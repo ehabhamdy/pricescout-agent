@@ -6,13 +6,10 @@ from firecrawl import Firecrawl
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Initialize FastMCP
 mcp = FastMCP("Firecrawl MCP Server")
 
-# Initialize Firecrawl client
 api_key = os.getenv("FIRECRAWL_API_KEY")
 if not api_key:
     raise ValueError("FIRECRAWL_API_KEY environment variable not set")
