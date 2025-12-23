@@ -1,14 +1,19 @@
 import os
 import json
-from typing import Optional, List
+from typing import List, Dict, Optional
 from fastmcp import FastMCP
 from firecrawl import Firecrawl
-from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+import logging
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
 
 mcp = FastMCP("Firecrawl MCP Server")
+
+SCRAPE_DIR = "scraped_content"
 
 api_key = os.getenv("FIRECRAWL_API_KEY")
 if not api_key:
@@ -58,6 +63,134 @@ def scrape_model_prices(url: str = "https://deepinfra.com/pricing") -> str:
 
     except Exception as e:
         return f"Error scraping prices: {str(e)}"
+
+
+@mcp.tool()
+def scrape_websites(
+    websites: Dict[str, str],
+    formats: List[str] = ['markdown', 'html'],
+) -> List[str]:
+    """
+    Scrape multiple websites using Firecrawl and store their content.
+    
+    Args:
+        websites: Dictionary of provider_name -> URL mappings
+        formats: List of formats to scrape ['markdown', 'html'] (default: both)
+        api_key: Firecrawl API key (if None, expects environment variable)
+        
+    Returns:
+        List of provider names for successfully scraped websites
+    """
+    
+    path = os.path.join(SCRAPE_DIR)
+    os.makedirs(path, exist_ok=True)
+    
+    metadata_file = os.path.join(path, "scraped_metadata.json")
+    metadata = {}
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(f"Could not decode metadata file: {metadata_file}. Starting fresh.")
+            metadata = {}
+
+    successful_scrapes = []
+
+    for provider_name, url in websites.items():
+        logger.info(f"Scraping {provider_name} at {url}")
+        
+        try:
+            # Check if recently scraped? For now, we overwrite or update.
+            
+            scrape_result = app.scrape(url, formats=formats)
+            
+            # Firecrawl returns a dictionary usually containing 'markdown', 'html', 'metadata' etc.
+            # Adjust based on actual response structure. Assuming standard Firecrawl response.
+            
+            if not scrape_result:
+                logger.error(f"No result returned for {provider_name}")
+                continue
+
+            content_files = {}
+            timestamp = datetime.now().isoformat()
+            
+            for fmt in formats:
+                content = scrape_result.get(fmt)
+                if content:
+                    filename = f"{provider_name}_{fmt}.txt"
+                    file_path = os.path.join(path, filename)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    content_files[fmt] = filename
+            
+            # Update metadata
+            metadata[provider_name] = {
+                "provider_name": provider_name,
+                "url": url,
+                "domain": urlparse(url).netloc,
+                "scraped_at": timestamp,
+                "formats": formats,
+                "success": "true",
+                "content_files": content_files,
+                "title": scrape_result.get('metadata', {}).get('title', ''),
+                "description": scrape_result.get('metadata', {}).get('description', '')
+            }
+            
+            successful_scrapes.append(provider_name)
+            logger.info(f"Successfully scraped {provider_name}")
+
+        except Exception as e:
+            logger.error(f"Failed to scrape {provider_name}: {e}")
+            # Optionally record failure in metadata
+            
+    # Save metadata
+    with open(metadata_file, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=4)
+        
+    return successful_scrapes
+
+@mcp.tool()
+def extract_scraped_info(identifier: str) -> str:
+    """
+    Extract information about a scraped website.
+    
+    Args:
+        identifier: The provider name, full URL, or domain to look for
+        
+    Returns:
+        Formatted JSON string with the scraped information
+    """
+    
+    logger.info(f"Extracting information for identifier: {identifier}")
+    # logger.info(f"Files in {SCRAPE_DIR}: {os.listdir(SCRAPE_DIR)}") # Optional debug
+
+    metadata_file = os.path.join(SCRAPE_DIR, "scraped_metadata.json")
+    if not os.path.exists(metadata_file):
+        return json.dumps({"error": "No scraped data found yet."}, indent=2)
+
+    try:
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to read metadata: {str(e)}"}, indent=2)
+
+    # Search strategy:
+    # 1. Exact match on provider_name (key)
+    # 2. Exact match on url
+    # 3. Match on domain
+    
+    if identifier in metadata:
+        return json.dumps(metadata[identifier], indent=2)
+        
+    for key, data in metadata.items():
+        if data.get('url') == identifier:
+            return json.dumps(data, indent=2)
+        if identifier in data.get('domain', ''): # Loose match for domain
+            return json.dumps(data, indent=2)
+            
+    return json.dumps({"error": f"No information found for identifier: {identifier}"}, indent=2)
+
 
 if __name__ == "__main__":
     mcp.run()
