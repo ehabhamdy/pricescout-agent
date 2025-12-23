@@ -6,10 +6,11 @@ from firecrawl import Firecrawl
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 import logging
+from datetime import datetime
+from urllib.parse import urlparse
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-
 
 mcp = FastMCP("Firecrawl MCP Server")
 
@@ -101,13 +102,10 @@ def scrape_websites(
         logger.info(f"Scraping {provider_name} at {url}")
         
         try:
-            # Check if recently scraped? For now, we overwrite or update.
+            # TODO: Check if recently scraped? For now, we overwrite or update.
             
             scrape_result = app.scrape(url, formats=formats)
-            
-            # Firecrawl returns a dictionary usually containing 'markdown', 'html', 'metadata' etc.
-            # Adjust based on actual response structure. Assuming standard Firecrawl response.
-            
+       
             if not scrape_result:
                 logger.error(f"No result returned for {provider_name}")
                 continue
@@ -116,9 +114,9 @@ def scrape_websites(
             timestamp = datetime.now().isoformat()
             
             for fmt in formats:
-                content = scrape_result.get(fmt)
+                content = getattr(scrape_result, fmt)
                 if content:
-                    filename = f"{provider_name}_{fmt}.txt"
+                    filename = f"{provider_name}.{fmt}"
                     file_path = os.path.join(path, filename)
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
@@ -133,8 +131,8 @@ def scrape_websites(
                 "formats": formats,
                 "success": "true",
                 "content_files": content_files,
-                "title": scrape_result.get('metadata', {}).get('title', ''),
-                "description": scrape_result.get('metadata', {}).get('description', '')
+                # "title": scrape_result.get('metadata', {}).get('title', ''),
+                # "description": scrape_result.get('metadata', {}).get('description', '')
             }
             
             successful_scrapes.append(provider_name)
