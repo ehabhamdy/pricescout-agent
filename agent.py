@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from mcp_client import Client, Tool
 from llm_client import LLMClient
+from data_extractor import DataExtractor
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -60,6 +61,7 @@ class Agent:
         self.available_tools: List[Tool] = []
         self.max_iterations: int = 10
         self._tool_client_map: Dict[str, Client] = {}
+        self.data_extractor: Optional[DataExtractor] = None
 
     async def initialize(self) -> None:
         """Initialize all clients and discover tools."""
@@ -69,6 +71,11 @@ class Agent:
             self.available_tools.extend(tools)
             for tool in tools:
                 self._tool_client_map[tool.name] = client
+            
+            if "sqlite" in client.name.lower():
+                self.data_extractor = DataExtractor(client, self.llm_client)
+                await self.data_extractor.setup_data_tables()
+
         logging.info(f"Agent initialized with {len(self.available_tools)} tools.")
 
     async def create_plan(self, goal: str) -> List[Task]:
@@ -196,6 +203,12 @@ Verify tool arguments against tool descriptions. dependencies is a list of task 
 
     async def run(self, goal: str) -> str:
         """Run the agent loop."""
+        if self.data_extractor:
+            existing_data = await self.data_extractor.check_existing_prices(goal)
+            if existing_data:
+                logging.info(f"Found existing data for goal: {goal}")
+                return existing_data
+
         plan = await self.create_plan(goal)
         if not plan:
             return "Failed to create a plan."
@@ -234,7 +247,15 @@ Verify tool arguments against tool descriptions. dependencies is a list of task 
                 break
         
         summary = "Execution completed.\n"
+        all_results = []
         for task in plan:
             summary += f"Task {task.id}: {task.status.value} - {task.result or task.error}\n"
+            if task.result:
+                all_results.append(str(task.result))
         
+        # Attempt to extract and store data from results
+        if self.data_extractor and all_results:
+            combined_results = "\n\n".join(all_results)
+            await self.data_extractor.extract_and_store_data(goal, combined_results)
+
         return summary
