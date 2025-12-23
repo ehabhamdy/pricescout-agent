@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field
 import logging
 from datetime import datetime
 from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from pathlib import Path
+import re
+
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -31,6 +35,53 @@ class AIModelPricing(BaseModel):
 
 class PricingCatalog(BaseModel):
     models: List[AIModelPricing]
+
+
+def save_clean_prices_markdown(html: str, output_path: str) -> None:
+    """
+    Read an HTML file, extract <table> elements,
+    and convert them to Markdown tables.
+
+    Args:
+        input_path: Path to the input HTML file
+        output_path: Path to the output Markdown file
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    markdown_tables = []
+
+    for table in soup.find_all("table"):
+        rows = []
+
+        for tr in table.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            row = [
+                re.sub(r"\s+", " ", cell.get_text(strip=True))
+                for cell in cells
+            ]
+            if row:
+                rows.append(row)
+
+        if not rows:
+            continue
+
+        # Header handling
+        header = rows[0]
+        separator = ["---"] * len(header)
+
+        md = []
+        md.append("| " + " | ".join(header) + " |")
+        md.append("| " + " | ".join(separator) + " |")
+
+        for row in rows[1:]:
+            # Pad or trim rows to header length
+            row = row[:len(header)] + [""] * (len(header) - len(row))
+            md.append("| " + " | ".join(row) + " |")
+
+        markdown_tables.append("\n".join(md))
+
+    output_md = "\n\n".join(markdown_tables)
+    Path(output_path).write_text(output_md, encoding="utf-8")
 
 @mcp.tool
 def scrape_model_prices(url: str = "https://deepinfra.com/pricing") -> str:
@@ -114,6 +165,7 @@ def scrape_websites(
             content_files = {}
             timestamp = datetime.now().isoformat()
             
+            # Save raw content from firecrawl scrape result
             for fmt in formats:
                 content = getattr(scrape_result, fmt)
                 if content:
@@ -122,7 +174,11 @@ def scrape_websites(
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
                     content_files[fmt] = filename
-            
+
+            # Save clean prices markdown
+            save_clean_prices_markdown(scrape_result.html, os.path.join(path, f"{provider_name}_clean.md"))
+            content_files["clean_markdown"] = f"{provider_name}_clean.md"
+
             # Update metadata
             metadata[provider_name] = {
                 "provider_name": provider_name,
