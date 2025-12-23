@@ -129,10 +129,11 @@ def scrape_websites(
                 "domain": urlparse(url).netloc,
                 "scraped_at": timestamp,
                 "formats": formats,
-                "success": "true",
                 "content_files": content_files,
-                # "title": scrape_result.get('metadata', {}).get('title', ''),
-                # "description": scrape_result.get('metadata', {}).get('description', '')
+                "title": scrape_result.metadata.title,
+                "description": scrape_result.metadata.description,
+                "scrap_id": scrape_result.metadata.scrape_id,
+                "success": "success" if scrape_result.metadata.status_code == 200 else "failure",
             }
             
             successful_scrapes.append(provider_name)
