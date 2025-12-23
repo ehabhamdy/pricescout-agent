@@ -36,9 +36,10 @@ class PricingCatalog(BaseModel):
 def scrape_model_prices(url: str = "https://deepinfra.com/pricing") -> str:
     """
     Scrape LLM model prices from a supported website (e.g., deepinfra.com).
-    args:
+
+    Args:
         url: URL to scrape (required)
-    returns:
+    Returns:
         JSON string containing the pricing catalog
     """
     try:
