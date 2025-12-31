@@ -10,6 +10,16 @@
             "request": "launch",
             "program": "main.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug MCP Server (Attach)",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "preLaunchTask": "Start MCP Inspector (Debug)"
         }
-    ]
+    ]                                                                                                                                                                                                                                                               
 }

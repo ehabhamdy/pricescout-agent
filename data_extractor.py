@@ -58,7 +58,7 @@ class DataExtractor:
             Text: {llm_response}
 
             Extract pricing plans with this structure:
-            {{
+            [{{
                 "company_name": "company name",
                 "plans": [
                     {{
@@ -72,7 +72,7 @@ class DataExtractor:
                         "query": "{user_query}"
                     }}
                 ]
-            }}
+            }}]
 
             Return only valid JSON, no other text. Do not return your response enclosed in ```json```
             """
@@ -87,30 +87,49 @@ class DataExtractor:
                  logging.error(f"Failed to decode JSON from extraction response: {e}. Response was: {extraction_response}")
                  return
 
-            company_name = pricing_data.get("company_name", "Unknown")
+            logging.info(f"Extracted data: {json.dumps(pricing_data, indent=2)}")
 
-            for plan in pricing_data.get("plans", []):
-                await self.sqlite_client.execute_tool("write_query", {
-                    "query": """
-                    INSERT INTO pricing_plans
-                    (company_name, plan_name, input_tokens, output_tokens, currency,
-                     billing_period, features, limitations, source_query)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    "args": [
-                        company_name,
-                        plan.get("plan_name"),
-                        plan.get("input_tokens"),
-                        plan.get("output_tokens"),
-                        plan.get("currency", "USD"),
-                        plan.get("billing_period"),
-                        json.dumps(plan.get("features", [])),
-                        plan.get("limitations"),
-                        user_query
-                    ]
-                })
+            # Use LLM to generate the SQL insert query
+            sql_prompt = f"""
+            Generate a SQLite insert query to insert this data into the 'pricing_plans' table.
+            
+            Table Schema:
+            CREATE TABLE IF NOT EXISTS pricing_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_name TEXT NOT NULL,
+                plan_name TEXT NOT NULL,
+                input_tokens REAL,
+                output_tokens REAL,
+                currency TEXT DEFAULT 'USD',
+                billing_period TEXT,
+                features TEXT,
+                limitations TEXT,
+                source_query TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
 
-            logger.info(f"Stored {len(pricing_data.get('plans', []))} pricing plans for {company_name}")
+            Data to insert:
+            {json.dumps(pricing_data, indent=2)}
+            
+            Constraint: Use 'source_query' column to store the value of: {user_query}
+            
+            Return ONLY the SQL query.
+            Example:
+            INSERT INTO pricing_plans (company_name, plan_name, input_tokens, output_tokens, currency, billing_period, features, limitations, source_query) VALUES ('deepinfra', 'DeepSeek-OCR', 0.03, 0.1, 'USD', 'one-time', '[]', null, 'pricing pages from deepinfra, fireworks, and groq'), ('deepinfra', 'DeepSeek-V3.1-Terminus', 0.21, 0.79, 'USD', 'one-time', '$0.168 cached for input tokens', null, 'pricing pages from deepinfra, fireworks, and groq')
+
+            Don't wrap the query in ```sql``` or ```
+            The query should be in single line without any line breaks
+            """
+            
+            messages = [{"role": "user", "content": sql_prompt}]
+            insert_query = self.llm_client.get_response(messages) 
+            # "INSERT INTO pricing_plans (company_name, plan_name, input_tokens, output_tokens, currency, billing_period, features, limitations, source_query) VALUES \n('deepinfra', 'DeepSeek-OCR', 0.03, 0.1, 'USD', 'one-time', '[]', null, 'pricing pages from deepinfra, fireworks, and groq'),\n('deepinfra', 'DeepSeek-V3.1-Terminus', 0.21, 0.79, 'USD', 'one-time', '$0.168 cached for input tokens', null, 'pricing pages from deepinfra, fireworks, and groq'),\n('deepinfra', 'DeepSeek-V3-0324', 0.2, 0.88, 'USD', 'one-time', '$0.106 cached for input tokens', null, 'pricing pages from deepinfra, fireworks, and groq'),\n('deepinfra', 'DeepSeek-V3', 0.32, 0.89, 'USD', 'one-time', '[]', null, 'pricing pages from deepinfra, fireworks, and groq');"
+            logging.info(f"Generated SQL query: {insert_query}")
+            try:
+                await self.sqlite_client.execute_tool("write_query", {"query": insert_query})
+                logger.info(f"Executed data insertion for {len(pricing_data.get('plans', []))} plans")
+            except Exception as e:
+                logging.error(f"Failed to execute generated SQL query: {e}")
 
         except Exception as e:
             logging.error(f"Error extracting pricing data: {e}")

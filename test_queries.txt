@@ -1,0 +1,6 @@
+Compare fireworks and deepinfra's costs for deepseek v3
+
+scrape these sites: {'deepinfra': 'https://deepinfra.com/pricing', 'fireworks': 'https://fireworks.ai/pricing#serverless-pricing', 'groq': 'https://groq.com/pricing'}
+
+scrape these sites: {'fireworks': 'https://fireworks.ai/pricing#serverless-pricing', 'groq': 'https://groq.com/pricing'}
+
