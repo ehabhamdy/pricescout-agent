@@ -52,11 +52,9 @@ class DataExtractor:
     async def extract_and_store_data(self, user_query: str, llm_response: str) -> None:
         """Extract structured data from LLM response and store it."""
         try:
-            extraction_prompt = f"""
-            Analyze this text and extract pricing information in JSON format:
-
+            extraction_prompt = f"""Analyze this text and extract pricing information in JSON format:
             Text: {llm_response}
-
+            
             Extract pricing plans with this structure:
             [{{
                 "company_name": "company name",
@@ -80,6 +78,8 @@ class DataExtractor:
             extraction_response = await self._get_structured_extraction(extraction_prompt)
             # Cleanup markdown code blocks if present
             extraction_response = extraction_response.replace("```json", "").replace("```", "").strip()
+            # removing \n from the response
+            # extraction_response = extraction_response.replace("\\n", "\n")
 
             try:
                 pricing_data = json.loads(extraction_response)
@@ -90,8 +90,7 @@ class DataExtractor:
             logging.info(f"Extracted data: {json.dumps(pricing_data, indent=2)}")
 
             # Use LLM to generate the SQL insert query
-            sql_prompt = f"""
-            Generate a SQLite insert query to insert this data into the 'pricing_plans' table.
+            sql_prompt = f"""Generate a SQLite insert query to insert this data into the 'pricing_plans' table.
             
             Table Schema:
             CREATE TABLE IF NOT EXISTS pricing_plans (
@@ -136,8 +135,7 @@ class DataExtractor:
 
     async def check_existing_prices(self, user_query: str) -> str | None:
         """Check if we already have pricing data relevant to the query."""
-        extraction_prompt = f"""
-        Extract the company name or service name from this query to check in the database.
+        extraction_prompt = f"""Extract the company name or service name from this query to check in the database.
         Query: {user_query}
         Return ONLY the name, nothing else.
         """
