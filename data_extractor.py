@@ -78,6 +78,8 @@ class DataExtractor:
             extraction_response = await self._get_structured_extraction(extraction_prompt)
             # Cleanup markdown code blocks if present
             extraction_response = extraction_response.replace("```json", "").replace("```", "").strip()
+            # removing \n from the response
+            # extraction_response = extraction_response.replace("\\n", "\n")
 
             try:
                 pricing_data = json.loads(extraction_response)

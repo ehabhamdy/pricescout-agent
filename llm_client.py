@@ -57,7 +57,7 @@ class LLMClient:
         }
         payload = {
             "model": "gpt-4o",
-            "max_tokens": 1024,
+            "max_tokens": 8024, # needed to be encreased of the json extraction prompt
             "messages": messages
         }
         return self._execute_request(url, headers, payload)
@@ -94,7 +94,7 @@ class LLMClient:
         return self._execute_request(url, headers, payload)
 
     def _execute_request(self, url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> str:
-        with httpx.Client() as client:
+        with httpx.Client(timeout=httpx.Timeout(60.0)) as client:
             response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
