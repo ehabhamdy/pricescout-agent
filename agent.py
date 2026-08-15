@@ -1,240 +1,189 @@
-import asyncio
 import json
 import logging
-import re
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, List
+from urllib.parse import urlparse
 
-from mcp_client import Client, Tool
 from llm_client import LLMClient
+from mcp_client import MCPClient
+from price_tools import PriceTools
 
-class TaskStatus(Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-
-@dataclass
-class Task:
-    id: int
-    description: str
-    tool_name: Optional[str] = None
-    tool_args: Optional[Dict[str, Any]] = None
-    status: TaskStatus = TaskStatus.PENDING
-    result: Optional[Any] = None
-    error: Optional[str] = None
-    dependencies: List[int] = field(default_factory=list)
 
 class AgentMemory:
-    def __init__(self) -> None:
-        self.facts: List[str] = []
-        self.task_history: List[Task] = []
-        self.context: Dict[str, Any] = {}
+    """Small conversational memory containing only completed chat turns."""
 
-    def add_fact(self, fact: str) -> None:
-        """Add a learned fact to memory."""
-        if fact not in self.facts:
-            self.facts.append(fact)
+    def __init__(self, max_turns: int = 6) -> None:
+        self.max_turns = max_turns
+        self.messages: List[Dict[str, Any]] = []
 
-    def get_relevant_facts(self, query: str, max_facts: int = 5) -> List[str]:
-        """Retrieve facts relevant to the current query."""
-        # Simple keyword matching for now
-        query_words = set(query.lower().split())
-        relevant = []
-        for fact in self.facts:
-            fact_words = set(fact.lower().split())
-            if query_words.intersection(fact_words):
-                relevant.append(fact)
-        
-        return relevant[:max_facts]
+    def add_exchange(self, user_message: str, assistant_message: str) -> None:
+        self.messages.extend(
+            [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assistant_message},
+            ]
+        )
+        self.messages = self.messages[-(self.max_turns * 2):]
+
+    def get_messages(self) -> List[Dict[str, Any]]:
+        return [message.copy() for message in self.messages]
+
 
 class Agent:
-    """Proactive agent that plans and executes tasks to achieve a goal."""
+    """Run an LLM tool loop over tools discovered from MCP servers."""
 
-    def __init__(self, clients: List[Client], llm_client: LLMClient, memory: AgentMemory) -> None:
-        self.clients: List[Client] = clients
-        self.llm_client: LLMClient = llm_client
-        self.memory: AgentMemory = memory
-        self.available_tools: List[Tool] = []
-        self.max_iterations: int = 10
-        self._tool_client_map: Dict[str, Client] = {}
+    def __init__(
+        self,
+        mcp_clients: List[MCPClient],
+        llm_client: LLMClient,
+        memory: AgentMemory,
+    ) -> None:
+        self.mcp_clients = mcp_clients
+        self.llm_client = llm_client
+        self.memory = memory
+        self.max_iterations = 10
+        self.price_tools: PriceTools | None = None
 
     async def initialize(self) -> None:
-        """Initialize all clients and discover tools."""
-        for client in self.clients:
-            await client.initialize()
-            tools = await client.list_tools()
-            self.available_tools.extend(tools)
-            for tool in tools:
-                self._tool_client_map[tool.name] = client
-        logging.info(f"Agent initialized with {len(self.available_tools)} tools.")
+        """Connect to every MCP server and discover its tools."""
+        sqlite_client = None
+        firecrawl_client = None
+        sqlite_tools: set[str] = set()
+        firecrawl_tools: set[str] = set()
 
-    async def create_plan(self, goal: str) -> List[Task]:
-        """Create an execution plan for the given goal."""
-        system_prompt = self._build_planning_prompt(goal)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Goal: {goal}"}
-        ]
+        for mcp_client in self.mcp_clients:
+            await mcp_client.start()
+            client = mcp_client.connected_client()
+            tool_names = {tool.name for tool in await client.list_tools()}
+            if "sqlite" in mcp_client.name.lower():
+                sqlite_client = client
+                sqlite_tools = tool_names
+            if "firecrawl" in mcp_client.name.lower():
+                firecrawl_client = client
+                firecrawl_tools = tool_names
 
-        response = self.llm_client.get_response(messages)
-        logging.info(f"Plan response: {response}")
+        sqlite_requirements = {"read_query", "write_query"}
+        if not sqlite_client or not sqlite_requirements.issubset(sqlite_tools):
+            raise RuntimeError("SQLite MCP must provide read_query and write_query")
+        if not firecrawl_client or "scrape_websites" not in firecrawl_tools:
+            raise RuntimeError("Firecrawl MCP must provide scrape_websites")
 
-        return self._parse_plan_response(response)
+        self.price_tools = PriceTools(
+            sqlite_client,
+            firecrawl_client,
+            self._provider_catalog(),
+        )
+        await self.price_tools.initialize()
+        logging.info("Agent initialized with 3 narrow pricing tools.")
 
-    def _build_planning_prompt(self, goal: str) -> str:
-        """Build the system prompt for planning."""
-        tools_description = "\n".join([tool.format_for_llm() for tool in self.available_tools])
-        relevant_facts = self.memory.get_relevant_facts(goal)
-        facts_str = "\n".join(relevant_facts) if relevant_facts else "No relevant facts found."
+    def _provider_catalog(self) -> Dict[str, str]:
+        path = Path(__file__).with_name("providers.json")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            providers = {}
+            for name, url in data.items():
+                if not isinstance(name, str) or not isinstance(url, str):
+                    continue
+                parsed_url = urlparse(url)
+                if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+                    providers[name] = url
+                else:
+                    logging.warning("Ignoring invalid provider URL for %s", name)
+            return providers
+        except (OSError, json.JSONDecodeError, TypeError):
+            logging.warning("Could not load provider catalog from %s", path)
+            return {}
 
-        return f"""You are an AI agent that creates execution plans.
+    def _system_prompt(self) -> str:
+        return """You are PriceScout, a pricing research assistant.
 
-Available tools:
-{tools_description}
+Use the provided narrow pricing tools whenever data is needed. Do not invent
+tool results, providers, models, URLs, or prices.
 
-Relevant facts from memory:
-{facts_str}
+For pricing requests:
+1. Call find_prices first for every requested provider and model.
+2. If missing_providers is empty, answer from those database records.
+3. Otherwise call scrape_provider_pricing for only the missing providers.
+4. Extract only prices explicitly present in the scrape content and pass them to
+   save_prices. Never infer or manufacture a missing price.
+5. Call find_prices again to verify saved records before answering.
+6. Treat ok=false as a tool failure and explain any unresolved missing data.
 
-Create a detailed plan to achieve the user's goal.
-Return ONLY a JSON array of tasks with the following structure:
-[
-  {{
-    "id": 1,
-    "description": "task description",
-    "tool_name": "exact_tool_name",
-    "tool_args": {{"arg_name": "value"}},
-    "dependencies": []
-  }}
-]
-Verify tool arguments against tool descriptions. dependencies is a list of task IDs that must complete before this task.
+After using the tools, answer the user directly. State whether the answer came
+from cached database rows or a fresh scrape. Do not return an execution plan or
+an internal task summary.
 """
 
-    def _parse_plan_response(self, response: str) -> List[Task]:
-        """Parse the plan response from the LLM."""
-        try:
-            tasks = []
-            
-            # Strategy 1: Look for JSON code blocks
-            code_blocks = re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", response, re.DOTALL | re.IGNORECASE)
-            
-            if code_blocks:
-                for block in reversed(code_blocks):
-                    try:
-                        return self._parse_json_tasks(block)
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        continue
-            
-            # Strategy 2: Look for the outermost array structure
-            start_idx = response.find('[')
-            end_idx = response.rfind(']')
-            
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                try:
-                    possible_json = response[start_idx : end_idx + 1]
-                    return self._parse_json_tasks(possible_json)
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    logging.warning(f"Failed to parse raw extracted JSON: {e}")
+    def _function_tools(self) -> List[Dict[str, Any]]:
+        if not self.price_tools:
+            raise RuntimeError("Agent is not initialized")
+        return self.price_tools.model_tools()
 
-            logging.error("Could not find valid JSON plan in response.")
-            return []
-
-        except Exception as e:
-            logging.error(f"Failed to parse plan: {e}")
-            return []
-
-    def _parse_json_tasks(self, json_str: str) -> List[Task]:
-        """Helper to parse tasks from a JSON string."""
-        data = json.loads(json_str)
-        parsed_tasks = []
-        for item in data:
-            parsed_tasks.append(Task(
-                id=item["id"],
-                description=item["description"],
-                tool_name=item.get("tool_name"),
-                tool_args=item.get("tool_args"),
-                dependencies=item.get("dependencies", [])
-            ))
-        return parsed_tasks
-
-    def can_execute_task(self, task: Task, completed_tasks: Set[int]) -> bool:
-        """Check if a task's dependencies are satisfied."""
-        for dep_id in task.dependencies:
-            if dep_id not in completed_tasks:
-                return False
-        return True
-
-    async def execute_task(self, task: Task) -> None:
-        """Execute a single task."""
-        logging.info(f"Executing task {task.id}: {task.description}")
-        task.status = TaskStatus.IN_PROGRESS
-
-        if not task.tool_name:
-            task.result = "No tool specified, assumed manual completion or reasoning."
-            task.status = TaskStatus.COMPLETED
-            return
-
-        target_client = self._tool_client_map.get(task.tool_name)
-        
-        if not target_client:
-            task.error = f"Tool {task.tool_name} not found."
-            task.status = TaskStatus.FAILED
-            return
+    async def _execute_tool_call(self, tool_call: Dict[str, Any]) -> str:
+        function = tool_call.get("function", {})
+        tool_name = function.get("name", "")
+        raw_arguments = function.get("arguments", "{}")
 
         try:
-            result = await target_client.execute_tool(task.tool_name, task.tool_args or {})
-            task.result = result
-            task.status = TaskStatus.COMPLETED
-            
-            self.memory.add_fact(f"Task {task.id} result: {str(result)[:200]}...")
+            arguments = json.loads(raw_arguments or "{}")
+            if not isinstance(arguments, dict):
+                raise ValueError("tool arguments must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as exc:
+            return json.dumps(
+                {"ok": False, "error": f"Invalid arguments for {tool_name}: {exc}"}
+            )
 
-        except Exception as e:
-            task.error = str(e)
-            task.status = TaskStatus.FAILED
+        logging.info("Model requested tool %s", tool_name)
+
+        try:
+            if not self.price_tools:
+                raise RuntimeError("Agent is not initialized")
+            return await self.price_tools.execute(tool_name, arguments)
+        except Exception as exc:
+            logging.warning("Tool %s failed: %s", tool_name, exc)
+            return json.dumps({"ok": False, "error": str(exc)})
 
     async def run(self, goal: str) -> str:
-        """Run the agent loop."""
-        plan = await self.create_plan(goal)
-        if not plan:
-            return "Failed to create a plan."
+        """Run model -> tool -> result iterations until the model answers."""
+        if not self.price_tools:
+            raise RuntimeError("Agent is not initialized")
+        self.price_tools.reset_turn()
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self._system_prompt()},
+            *self.memory.get_messages(),
+            {"role": "user", "content": goal},
+        ]
+        for iteration in range(1, self.max_iterations + 1):
+            logging.info("Starting model iteration %s", iteration)
+            assistant_message = self.llm_client.get_completion(
+                messages,
+                self._function_tools(),
+            )
+            messages.append(assistant_message)
 
-        logging.info(f"Created plan with {len(plan)} tasks.")
-        
-        completed_tasks = set()
-        iterations = 0
+            tool_calls = assistant_message.get("tool_calls") or []
 
-        while len(completed_tasks) < len(plan) and iterations < self.max_iterations:
-            iterations += 1
-            made_progress = False
-            
-            pending_tasks = [t for t in plan if t.id not in completed_tasks]
-            if not pending_tasks:
-                break
+            # If no tool calls required, reply with the final answer
+            if not tool_calls:
+                final_answer = (assistant_message.get("content") or "").strip()
+                if not final_answer:
+                    final_answer = "I could not produce a final answer."
+                self.memory.add_exchange(goal, final_answer)
+                return final_answer
 
-            for task in plan:
-                if task.id in completed_tasks:
-                    continue
-                
-                # Logic for failed dependencies could be improved here, but skipped for brevity/preservation
-                
-                if self.can_execute_task(task, completed_tasks):
-                    await self.execute_task(task)
-                    
-                    if task.status == TaskStatus.COMPLETED:
-                        completed_tasks.add(task.id)
-                        made_progress = True
-                    elif task.status == TaskStatus.FAILED:
-                        logging.error(f"Task {task.id} failed: {task.error}")
-                        return f"Agent execution failed at task {task.id}: {task.error}"
+            # Otherwise execute the tools and include the results of the tool calls in the messages to be send to the model
+            for tool_call in tool_calls:
+                tool_result = await self._execute_tool_call(tool_call)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": tool_call["function"]["name"],
+                        "content": tool_result,
+                    }
+                )
 
-            if not made_progress:
-                logging.warning("No progress made in this iteration. Possible deadlock or all remaining tasks blocked.")
-                break
-        
-        summary = "Execution completed.\n"
-        for task in plan:
-            summary += f"Task {task.id}: {task.status.value} - {task.result or task.error}\n"
-        
-        return summary
+        return (
+            f"I stopped after {self.max_iterations} model iterations without "
+            "receiving a final answer."
+        )

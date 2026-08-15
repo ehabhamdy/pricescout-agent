@@ -1,18 +1,22 @@
 {
     "mcpServers": {
-        "puppeteer": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@modelcontextprotocol/server-puppeteer"
-            ]
-        },
         "sqlite": {
             "command": "uvx",
             "args": [
+                "--from",
+                "mcp-server-sqlite==2025.4.25",
+                "--with",
+                "mcp<2",
                 "mcp-server-sqlite",
                 "--db-path",
                 "./sqlite.db"
+            ]
+        },
+        "firecrawl": {
+            "command": "uv",
+            "args": [
+                "run",
+                "firecrawl_server.py"
             ]
         }
     }

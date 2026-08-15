@@ -7,4 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "python-dotenv==1.2.1",
     "fastmcp==2.13.3",
+    "firecrawl-py>=4.12.0",
+    "beautifulsoup4>=4.14.3",
 ]
