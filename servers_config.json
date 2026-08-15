@@ -3,6 +3,10 @@
         "sqlite": {
             "command": "uvx",
             "args": [
+                "--from",
+                "mcp-server-sqlite==2025.4.25",
+                "--with",
+                "mcp<2",
                 "mcp-server-sqlite",
                 "--db-path",
                 "./sqlite.db"
